@@ -1,0 +1,366 @@
+%% Minesweeper
+function gameState = gameMinesweeper(gameState, width, height, mineRatio, ...
+    flag)
+    
+    % Initialize variables
+    sprEmpty = 3;
+    sprTile = 2;
+    sprFlag = 4;
+    sprMine = 6;
+    sprNumbersStart = 6;
+    sprBottomPane = 31;
+    sprHintButton = 32;
+    sprHintTile = 33;
+    sprCrosshair = 34;
+
+    numMines = ceil(width * height * mineRatio);
+    fastTime = 0.02125 * (width * height)^1.6 * (1 + numMines/(width*height));
+    fprintf("Complete level in %.1fs for a bonus hint\n", fastTime);
+    scene = gameState.scene;
+    font = 'Helvetica';
+    
+    % Get level info from flag
+    timedClickMode = (flag == "boss" || flag == "final_boss");
+    affinityReward = 0;
+    hintsReward = 0;
+    
+    switch (flag)
+        case "challenge"
+            affinityReward = 10;
+            hintsReward = 3;
+        case "boss"
+            affinityReward = 20;
+            hintsReward = 5;
+        case "final_boss"
+            affinityReward = 40;
+    end
+
+    % Initialize timed click mode variables
+    forceClickDelay = 0;
+    forceClickInterval = 15;
+
+    % Verify mine ratio is possible
+    if (width * height - 9 - numMines <= 0)
+        error("Number of mines exceeds the number of possible tiles");
+    end
+    
+    % Adjust zoom to number of tiles
+    maxZoom = gameState.defaultZoom;
+    screenDimensions = get(0, 'screensize');
+    scene.zoom = min(maxZoom, max(1, floor( ...
+        screenDimensions(4) / (height * gameState.cellSize))));
+
+    fontScale = 2 + sqrt(2)^scene.zoom;
+
+    % Announce new game
+    fprintf("NEW MINESWEEPER INSTANCE:\n%i x %i w/ %i mines (%s)\n", height, width, numMines, flag);
+
+    % Initialize display characteristics
+    board = ones(height, width);
+    viewWidth = width;
+    viewHeight = height;
+
+    % Fill board
+    for i = 1:width
+        for j = 1:height
+            board(j, i) = sprTile;
+        end
+    end
+
+    % Fill rightPane
+    [girlHeight, girlWidth] = size(gameState.girlSpritesBackground);
+    viewWidth = viewWidth + girlWidth;
+    rightPane = ones(viewHeight - girlHeight, girlWidth);
+    rightPane = vertcat(rightPane, gameState.girlSpritesBackground);
+
+    % Initialize dialog pane
+    dialogPane = [repelem(sprBottomPane, viewWidth); repelem(sprBottomPane, viewWidth)];
+    viewHeight = viewHeight + 2;
+    dialogPane(:, 1:ceil(viewWidth/3)) = sprHintButton;
+
+    % Initialize canvas -- merge panes
+    canvas = horzcat(board, rightPane);
+    canvas = vertcat(canvas, dialogPane);
+    canvasForeground = ones(viewHeight, viewWidth);
+
+    % Draw canvas
+    scene.drawScene(canvas);
+
+    % Add message
+    lines = ["Go ahead bro... make a move...", "Nice !", ...
+        "You are  the best !", "You got all the mines !", ...
+        "I think we should see other people..."];
+    msg = text((2/3) * viewWidth * gameState.cellSize * scene.zoom, ...
+        (height + 1) * gameState.cellSize * scene.zoom, lines(1), ...
+        'FontSize', 3 * fontScale,'HorizontalAlignment','center', ...
+        'Color', [1 1 1], 'VerticalAlignment','middle', 'FontName', font);
+    
+    % Add hint button
+    hintButton = text(0.5 * ceil(viewWidth/3) * gameState.cellSize * scene.zoom, ...
+        (height + 2/3) * gameState.cellSize * scene.zoom, "use a hint", ...
+        'FontSize', 4 * fontScale,'HorizontalAlignment','center', ...
+        'Color', [0.8 0.8 0.8], 'VerticalAlignment','middle', 'FontName', font, ...
+        'FontWeight', 'bold');
+    hintsLeftText = text(0.5 * ceil(viewWidth/3) * gameState.cellSize * scene.zoom, ...
+        (height + 4/3) * gameState.cellSize * scene.zoom, ...
+        "(" + gameState.hints + " left)", ...
+        'FontSize', 4 * fontScale,'HorizontalAlignment','center', ...
+        'Color', [0.8 0.8 0.8], 'VerticalAlignment','middle', 'FontName', font);
+    
+    % Timer text
+    timerText = text((viewWidth - girlWidth/2) * gameState.cellSize * scene.zoom, ...
+        (0.5) * gameState.cellSize * scene.zoom, "0:00", ...
+        'FontSize', 6 * fontScale,'HorizontalAlignment','center', ...
+        'Color', [1 1 1], 'VerticalAlignment','top', 'FontName', font, ...
+        'FontWeight', 'bold');
+
+    % Mines left text
+    minesLeftText = text((viewWidth - girlWidth/2) * gameState.cellSize * scene.zoom, ...
+        (1.5) * gameState.cellSize * scene.zoom, numMines + " mines left", ...
+        'FontSize', 3 * fontScale,'HorizontalAlignment','center', ...
+        'Color', [1 1 1], 'VerticalAlignment','top', 'FontName', font);
+    
+    % Fast time text
+    fastTimeText = text((viewWidth - girlWidth/2) * gameState.cellSize * scene.zoom, ...
+        (2) * gameState.cellSize * scene.zoom, "Fast time: " + floor(fastTime) + "s", ...
+        'FontSize', 2 * fontScale, 'HorizontalAlignment', 'center', ...
+        'Color', [1 1 1], 'VerticalAlignment', 'top', 'FontName', font);
+
+    % Fade in
+    gameState.fadeIn(viewWidth * gameState.cellSize * scene.zoom, ...
+        viewHeight * gameState.cellSize * scene.zoom);
+    
+    % Initialize timer
+    gameTimer = timer();
+    gameTimer.Period = 1;
+    gameTimer.ExecutionMode = 'fixedRate';
+    gameTimer.TimerFcn = @funcUpdateGameTime;
+    gameTimer.UserData = struct('timeElapsed', 0, 'text', timerText, ...
+        'timeSinceClick', -forceClickDelay - 1, 'forceClickInterval', ...
+        forceClickInterval, 'timedClickMode', timedClickMode);
+    gameTimer.StartDelay = 0;
+
+    % Game loop
+    gameOver = false;
+    safeStart = true;
+    tilesCleared = 0;
+    tilesNeeded = width * height - numMines;
+    numFlags = 0;
+
+    while (~gameOver && tilesCleared ~= tilesNeeded)
+        [my, mx, mb] = scene.getMouseInput();
+
+        hereSpr = canvas(my, mx); % the sprite of clicked tile
+        
+        % remove fast time text
+        fastTimeText.String = "";
+
+        % player clicks
+        if (mx <= width && my <= height)
+
+            % player clicks a tile
+            if (mb == 1 && safeStart) %% left click -- clear & generate mines
+                
+                % generate the matrices
+                [minesMatrix, countMatrix] = funcGenerateMinesweeperMatrices( ...
+                    mx, my, width, height, numMines);
+                
+                % open the pressed tile
+                [tilesCleared, canvas, canvasForeground] = funcOpenTile( ...
+                            my, mx, canvas, canvasForeground, tilesCleared, ...
+                            width, height, countMatrix, sprEmpty, ...
+                            sprTile, sprNumbersStart);
+    
+                % no longer in safe start mode
+                safeStart = false;
+
+                % start game timer
+                gameTimer.start();
+
+                % update message
+                msg.String = lines(2);
+    
+            elseif (mb == 1 && ~safeStart) % left click -- clear
+                if (hereSpr == sprTile)
+                    [canvas, canvasForeground, gameOver, msg, minesLeftText, ...
+                    tilesCleared] = funcClickHere(mx, my, width, height, minesMatrix, ...
+                    canvas, canvasForeground, sprFlag, sprMine, lines, msg, gameOver, ...
+                    sprEmpty, sprNumbersStart, tilesCleared, minesLeftText, countMatrix, ...
+                    tilesNeeded, sprTile);
+
+                    % handle force clicks if timed click mode
+                    if (timedClickMode)
+                        
+                        % crosshairs
+                        toClick = find(canvasForeground(1:height, 1:width) == sprCrosshair);
+
+                        for cr = 1:length(toClick)
+                            pos = toClick(cr);
+                            crossY = mod(pos - 1, height) + 1;
+                            crossX = ceil(pos / height);
+                            
+                            % click at (crossX, crossY)
+                            [canvas, canvasForeground, gameOver, msg, minesLeftText, ...
+                            tilesCleared] = funcClickHere(crossX, crossY, width, height, minesMatrix, ...
+                            canvas, canvasForeground, sprFlag, sprMine, lines, msg, gameOver, ...
+                            sprEmpty, sprNumbersStart, tilesCleared, minesLeftText, countMatrix, ...
+                            tilesNeeded, sprTile);
+                        end
+
+                        % timer exceeds interval
+                        if (gameTimer.UserData.timeSinceClick >= forceClickInterval)
+                            % calculate number of force clicks
+                            clicks = floor(gameTimer.UserData.timeSinceClick / ...
+                                forceClickInterval);
+                            
+                            % Get available crosshair placements
+                            availableIndices = find(canvas( ...
+                                1:height, 1:width) == sprTile ...
+                                | canvas(1:height, 1:width) == sprFlag);
+                            
+                            % Place crosshairs
+                            if (~isempty(availableIndices))
+                                for i = 1:min(clicks, length(availableIndices))
+                                    index = randi(length(availableIndices));
+                                    pos = availableIndices(index);
+                                    availableIndices(index) = [];
+    
+                                    crossY = mod(pos - 1, height) + 1;
+                                    crossX = ceil(pos / height);
+    
+                                    canvasForeground(crossY, crossX) = sprCrosshair;
+                                end
+                            end
+                        end
+
+                        % reset time elapsed since click
+                        gameTimer.UserData.timeSinceClick = 0;
+                    end
+
+                end
+            elseif (mb == 3) % right click -- flag
+                if (hereSpr == sprTile) % flag tile
+                    canvas(my, mx) = sprFlag;
+                    numFlags = numFlags + 1;
+                elseif (hereSpr == sprFlag) % unflag tile
+                    canvas(my, mx) = sprTile;
+                    numFlags = numFlags - 1;
+                end
+
+                minesLeftText.String = max(0, numMines - numFlags) + " mines left";
+            end
+        else
+            % player clicks outside the board
+
+            if (mx <= ceil(viewWidth/3) && ~safeStart)
+                % hint button
+                
+                if (gameState.hints > 0) 
+                    % get hint position
+                    [hintY, hintX] = funcGetHintPos(canvas, canvasForeground, ...
+                        minesMatrix, width, height, sprTile, sprHintTile, ...
+                        sprEmpty, sprFlag);
+
+                    % if valid place to put hint, put it on the board
+                    if (hintY ~= -1 && hintX ~= -1)
+                        
+                        % place hint
+                        canvasForeground(hintY, hintX) = sprHintTile;
+                        
+                        % if it's a flag, turn it into a tile
+                        canvas(hintY, hintX) = sprTile;
+
+                        % decrement hints
+                        gameState.hints = gameState.hints - 1;
+                        hintsLeftText.String = "(" + gameState.hints + " left)";
+                    end
+                    
+                    % if just used the last hint
+                    if (gameState.hints == 0)
+                        hintButton.String = "out of hints";
+                        hintsLeftText.String = "sorry bud";
+                    end
+                end
+            elseif (mx >= viewWidth - girlWidth && ...
+                    my >= viewHeight - girlHeight - 2 && my <= viewHeight - 2)
+                touchLines = ["Stop...", "Why did you do that..?", ...
+                    "Hey man. Don't do that."];
+                msg.String = touchLines(randi(length(touchLines)));
+            end
+        end
+        
+        % update scene
+        scene.drawScene(canvas, canvasForeground);
+    end
+    
+    % stop timer
+    gameTimer.stop();
+
+    % game end mesage
+    if (tilesCleared == tilesNeeded && gameTimer.UserData.timeElapsed <= fastTime)
+        % fast completion reward
+        msg.String = "Wow! So fast..! +1 hint";
+        gameState.hints = gameState.hints + 1;
+        gameState.affinity = gameState.affinity + 5;
+        hintsLeftText.String = "(" + gameState.hints + " left)";
+    elseif (tilesCleared == tilesNeeded)
+        % win message
+        msg.String = lines(end - 1);
+    else
+        % loss message
+        msg.String = lines(end);
+    end
+    
+    gameTimer.delete();
+    
+    % If player has beat the game
+    if (tilesCleared == tilesNeeded)
+        % dish out promised rewards
+        gameState.affinity = gameState.affinity + affinityReward;
+        if (hintsReward > 0)
+            pause(1.5);
+            msg.String = "+" + hintsReward + " hints for completion!";
+            gameState.hints = gameState.hints + hintsReward;
+            hintsLeftText.String = "(" + gameState.hints + " left)";
+        end
+        
+        % close the level
+        pause(1);
+        gameState.fadeOut(viewWidth * gameState.cellSize * scene.zoom, ...
+            viewHeight * gameState.cellSize * scene.zoom);
+        delete(msg);
+        delete(hintButton);
+        delete(hintsLeftText);
+        delete(timerText);
+        delete(minesLeftText);
+        delete(fastTimeText);
+        
+        % Send player to correct destination
+        if (flag ~= "final_boss")
+            gameState = funcGotoDestination(gameState, "dialog", "normal");
+        else
+            % Affinity check after beating final boss
+            if (gameState.affinity >= gameState.affinityRequired)
+                gameState = funcGotoDestination(gameState, "dialog", "final_pass");
+            elseif (gameState.affinity > 0)
+                gameState = funcGotoDestination(gameState, "dialog", "final_fail");
+            else
+                gameState = funcGotoDestination(gameState, "dialog", "final_hate");
+            end
+        end
+    else
+        % Go to losing dialog
+        pause(3);
+        gameState.fadeOut(viewWidth * gameState.cellSize * scene.zoom, ...
+            viewHeight * gameState.cellSize * scene.zoom);
+        delete(msg);
+        delete(hintButton);
+        delete(hintsLeftText);
+        delete(timerText);
+        delete(minesLeftText);
+        delete(fastTimeText);
+        
+        % Go to game over dialog
+        gameState = funcGotoDestination(gameState, "dialog", "game_over");
+    end
+end
